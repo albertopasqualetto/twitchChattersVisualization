@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Twitch Chatters Visualization</title>
+	<style>
+		body {
+			font-family: Arial, sans-serif;
+			/* max-width: 1200px; */
+			margin: 0 auto;
+			/* padding: 20px; */
+			background-color: #f4f4f4;
+		}
+		img {
+			height: 1em;
+		}
+		.container {
+			max-width: 1000px;
+			background-color: white;
+			border-radius: 8px;
+			box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+			padding: 20px;
+			margin: 20px auto;
+		}
+		#channel-form {
+			display: flex;
+			margin-bottom: 20px;
+		}
+		#channel-input {
+			flex-grow: 1;
+			padding: 10px;
+			margin-right: 10px;
+			border: 1px solid #ddd;
+			border-radius: 4px;
+		}
+		#submit-btn {
+			padding: 10px 20px;
+			background-color: #6441a5;
+			color: white;
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+		}
+		#error-message {
+			color: red;
+			margin-top: 10px;
+		}
+		#chatters-container {
+			display: flex;
+			flex-wrap: wrap;
+			padding: 10px;
+			justify-content: flex-start;
+			align-items: flex-start;
+			padding-top: 2px;
+			padding-left: 2px;
+			transition: padding 0.3s ease;
+		}
+		.chatter {
+			display: flex;
+			align-items: center;
+			position: relative;
+			text-align: center;
+			padding: 6px 10px;
+			transition: transform 0.3s ease;
+		}
+		.chatter:hover {
+			transform: scale(1.05);
+		}
+		.chatter-name {
+			font-weight: bold;
+		}
+		.badges {
+			display: flex;
+			justify-content: center;
+		}
+		.badge {
+			/* background-color: #f0f0f0; */
+			padding-right: 2px;
+		}
+		/* Add styles for the movable square */
+        #movable-square {
+            width: 200px;
+            height: 200px;
+            background-color: #6441a5;
+            position: absolute;
+            top: 50%;      /* Center vertically */
+            left: 50%;     /* Center horizontally */
+            transform: translate(-50%, -50%); /* Adjust position */
+            cursor: grab;
+            border-radius: 4px;
+            z-index: 1000;
+            overflow: hidden; /* Add this to clip the video to the square */
+        }
+
+        #movable-square video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* Ensure the video covers the square */
+        }
+	</style>
+</head>
+<body>
+	<div id="start-container" class="container">
+		<h1>Twitch Chatters Visualization</h1>
+		<p>To get the access token, follow these steps:</p>
+		<ol>
+			<li>Go to the following URL in your browser:</li>
+			<li><code id="auth-url"></code></li>
+			<li>Authorize the application.</li>
+			<li>After authorization, you will be redirected to a URL like <code>http://localhost#access_token=YOUR_ACCESS_TOKEN&...</code></li>
+			<li>Copy the <code>YOUR_ACCESS_TOKEN</code> part from the URL and use it in the script.</li>
+		</ol>
+		<form id="channel-form">
+			<input
+				type="text"
+				id="channel-input"
+				placeholder="Enter Twitch channel name"
+				required
+			>
+			<button type="submit" id="submit-btn">Fetch Chatters</button>
+		</form>
+		<button id="settings-btn">Settings</button>
+		<div id="settings-menu" style="display: none;">
+			<input
+				type="text"
+				id="client-id-input"
+				placeholder="Enter Client ID"
+				required
+			>
+			<input
+				type="password"
+				id="token-input"
+				placeholder="Enter YOUR_ACCESS_TOKEN"
+				required
+			>
+		</div>
+		<div id="error-message"></div>
+	</div>
+	<div id="chatters-container" style="display: none;">
+		<div id="movable-square">
+			<video autoplay muted playsinline></video>
+		</div>
+	</div>
+
+	<!-- Include TMI.js library -->
+	<script src="./tmi.min.js"></script>
+
+	<script>
+	const AUTH_URL = 'https://id.twitch.tv/oauth2/authorize?redirect_uri=http://localhost&response_type=token&scope=chat:read&client_id=';
+	const DEFAULT_CLIENT_ID = 'nr7rmg1zcd1irhcluljry7gd2ux8us';
+	const OVERRIDE_ACCESS_TOKEN = 'chxkownb4ungixes3fkofq71sjf6vx';
+	class TwitchChatViz {
+		constructor() {
+			if (DEFAULT_CLIENT_ID) {
+				localStorage.setItem('clientId', DEFAULT_CLIENT_ID);
+			}
+			if (OVERRIDE_ACCESS_TOKEN) {
+				localStorage.setItem('accessToken', OVERRIDE_ACCESS_TOKEN);
+			}
+
+			// DOM elements
+			this.channelForm = document.getElementById('channel-form');
+			this.channelInput = document.getElementById('channel-input');
+			this.tokenInput = document.getElementById('token-input');
+			this.clientIdInput = document.getElementById('client-id-input');
+			this.chattersContainer = document.getElementById('chatters-container');
+			this.errorMessage = document.getElementById('error-message');
+
+			 // Load saved values from localStorage
+			this.clientId = localStorage.getItem('clientId') || '';
+			this.accessToken = localStorage.getItem('accessToken') || '';
+
+			if (this.clientId) {
+				this.clientIdInput.value = this.clientId;
+				document.getElementById('auth-url').textContent = AUTH_URL + localStorage.getItem('clientId');
+			}
+			if (this.accessToken) {
+				this.tokenInput.value = this.accessToken;
+			}
+
+			// Chatters tracking
+			this.chatters = new Map();
+
+			// Add properties to store badges
+			this.globalBadges = {};
+			this.channelBadges = {};
+			this.badges = {};
+			this.broadcasterId = ''; // Add broadcasterId property
+
+
+			const urlParams = new URLSearchParams(window.location.search);
+			if (urlParams.has('channel')) {
+				const channelName = urlParams.get('channel');
+				this.run(channelName);
+			} else {
+				this.setupEventListeners();
+			}
+
+			this.clientIdInput.addEventListener('input', () => {
+				localStorage.setItem('clientId', this.clientIdInput.value);
+				document.getElementById('auth-url').textContent = AUTH_URL + localStorage.getItem('clientId');
+			});
+			this.tokenInput.addEventListener('input', () => {
+				localStorage.setItem('accessToken', this.tokenInput.value);
+			});
+		}
+
+		showStartContainer(show) {
+			const startContainer = document.getElementById('start-container');
+			if (show) {
+				startContainer.style.display = 'block';
+			} else {
+				startContainer.style.display = 'none';
+			}
+		}
+
+		async fetchUserId(user) { // New method to fetch user ID
+			try {
+				const response = await fetch(`https://api.twitch.tv/helix/users?login=${user}`, {
+					headers: {
+						'Client-ID': this.clientId,
+						'Authorization': `Bearer ${this.accessToken}`
+					}
+				});
+
+				if (!response.ok) {
+					throw new Error(`Failed to fetch user ID: ${response.statusText}`);
+				}
+
+				const data = await response.json();
+				if (data.data.length === 0) {
+					throw new Error('Channel not found');
+				}
+
+				this.broadcasterId = data.data[0].id;
+			} catch (error) {
+				this.showError(error.message);
+			}
+		}
+
+		async fetchGlobalBadges() {
+			try {
+				const response = await fetch('https://api.twitch.tv/helix/chat/badges/global', {
+					headers: {
+						'Client-ID': this.clientId,
+						'Authorization': `Bearer ${this.accessToken}`
+					}
+				});
+
+				if (!response.ok) {
+					throw new Error(`Failed to fetch badges: ${response.statusText}`);
+				}
+
+				const data = await response.json();
+				data.data.forEach(set => {
+					this.globalBadges[set.set_id] = set.versions;
+				});
+
+				data.data.forEach(set => {
+					this.globalBadges[set.set_id] = {};
+					set.versions.forEach(version => {
+						this.globalBadges[set.set_id][version.id] = version;
+					});
+				});
+
+				// console.log('Global badges fetched:', this.globalBadges);
+			} catch (error) {
+				this.showError(error.message);
+			}
+		}
+
+		async fetchChannelBadges(channelName) { // New method to fetch channel badges
+			try {
+				await this.fetchUserId(channelName);
+				const response = await fetch(`https://api.twitch.tv/helix/chat/badges?broadcaster_id=${this.broadcasterId}`, {
+					headers: {
+						'Client-ID': this.clientId,
+						'Authorization': `Bearer ${this.accessToken}`
+					}
+				});
+
+				if (!response.ok) {
+					throw new Error(`Failed to fetch channel badges: ${response.statusText}`);
+				}
+
+				const data = await response.json();
+				data.data.forEach(set => {
+					this.channelBadges[set.set_id] = set.versions;
+				});
+
+				data.data.forEach(set => {
+					this.channelBadges[set.set_id] = {};
+					set.versions.forEach(version => {
+						this.channelBadges[set.set_id][version.id] = version;
+					});
+				});
+
+				// console.log('Channel badges fetched:', this.channelBadges);
+			} catch (error) {
+				this.showError(error.message);
+			}
+		}
+
+		sumBagdes() {
+			this.badges = { ...this.globalBadges };
+			for (const setId in this.channelBadges) {
+				if (this.badges[setId]) {
+					this.badges[setId] = { ...this.badges[setId], ...this.channelBadges[setId] };
+				} else {
+					this.badges[setId] = this.channelBadges[setId];
+				}
+			}
+		}
+
+		async run(channelName) {
+			this.clientId = this.clientIdInput.value; // Update clientId with user input
+			this.accessToken = this.tokenInput.value; // Update accessToken with user input
+			// Save values to localStorage
+			localStorage.setItem('clientId', this.clientId);
+			localStorage.setItem('accessToken', this.accessToken);
+			await this.fetchUserId(channelName); // Fetch user ID 
+			if(this.broadcasterId) {
+				await this.fetchGlobalBadges(); // Fetch global badges on initialization
+				await this.fetchChannelBadges(channelName); // Fetch channel-specific badgesbefore connecting
+				this.sumBagdes();
+				console.log('All badges:', this.badges);
+				console.log(`Connecting to ${channelName}'s chat with ID ${this.broadcasterId}...`);
+				this.chattersContainer.style.display = 'flex';
+				this.showStartContainer(false);
+				this.connectAndFetchChatters(channelName);
+			}
+		}
+
+		setupEventListeners() {
+			this.channelForm.addEventListener('submit', async (e) => {
+				e.preventDefault();
+				// this.resetVisualization();
+
+				const channelName = this.channelInput.value.toLowerCase();
+				try {
+					await this.run(channelName);
+				} catch (error) {
+					this.showError(error.message);
+				}
+			});
+		}
+
+		// resetVisualization() {
+		// 	this.errorMessage.textContent = '';
+		// 	this.chattersContainer.innerHTML = '';
+		// 	this.chatters.clear();
+		// 	// this.showStartContainer(true);
+		// }
+
+		showError(message) {
+			this.errorMessage.textContent = message;
+		}
+
+		connectAndFetchChatters(channelName) {
+			// Initialize TMI.js client
+			this.client = new tmi.Client({
+				connection: {
+					secure: true,
+					reconnect: true
+				},
+				channels: [channelName]
+			});
+
+			// Connect the client
+			this.client.connect().catch(err => {
+				this.showError(`Connection error: ${err}`);
+			});
+
+			this.client.on('connected', () => {
+				console.log(`Connected to ${channelName}'s chat`);
+			});
+			// this.client.on('message', (channel, tags, message, self) => {
+			// 	console.log(tags['display-name']);
+			// 	console.log(tags['badges']);
+			// 	console.log(tags['color']);
+			// });
+
+			// Track errors
+			this.client.on('error', (err) => {
+				this.showError(`Connection error: ${err}`);
+			});
+
+			// Track chat messages to count message frequency
+			this.client.on('message', (channel, tags, message, self) => {
+				const username = tags.username;
+				const userBadges = tags.badges || {};
+
+				// Integrate global and channel badges
+				const badges = [];
+				for (const badgeId in userBadges) {
+					try {
+						if (this.badges[badgeId]) {
+							const version = userBadges[badgeId];
+							const badgeInfo = this.badges[badgeId][version];
+							if (badgeInfo) {
+								const badgeImageUrl = badgeInfo.image_url_1x;
+								badges.push({ id: badgeId, imageUrl: badgeImageUrl });
+							}
+						}
+					} catch (error) {
+						if (error instanceof TypeError) {
+							console.error(`Error processing badge ${badgeId} for user ${username}: ${error.message}`);
+						} else {
+							throw error;
+						}
+					}
+				}
+
+				this.chatters.set(username, {
+					username,
+					color: tags.color || this.generateRandomColor(),
+					badges: badges,
+				});
+				this.renderChatters();
+			});
+		}
+
+
+		renderChatters() {
+			// Clear existing chatters to prevent duplicates
+			this.chatters.forEach(chatter => {
+				if (true || !document.getElementById(`chatter-${chatter.username}`)) {
+					// Create chatter element
+					const chatterEl = document.createElement('div');
+					chatterEl.className = 'chatter';
+					chatterEl.id = `chatter-${chatter.username}`;
+
+					// Badges
+					const badgesEl = document.createElement('div');
+					badgesEl.className = 'badges';
+					chatter.badges.forEach(badge => {
+						const badgeEl = document.createElement('img');
+						badgeEl.className = 'badge';
+						badgeEl.style.height = '20px';
+						badgeEl.src = badge.imageUrl;
+						badgeEl.alt = badge.id;
+						badgeEl.title = badge.id;
+						badgesEl.appendChild(badgeEl);
+					});
+					chatterEl.appendChild(badgesEl);
+
+					// Chatter name
+					const nameEl = document.createElement('div');
+					nameEl.className = 'chatter-name';
+					nameEl.style.color = chatter.color;
+					nameEl.textContent = chatter.username;
+					chatterEl.appendChild(nameEl);
+
+					// Add border if color is too light
+					if (this.isColorInvisible(chatter.color)) {
+						chatterEl.style.webkitTextStroke = '0.04em #000';
+						console.log('Light color:', chatter.color);
+					}
+
+					this.chattersContainer.appendChild(chatterEl);
+				}
+			});
+		}
+
+		isColorInvisible(color) {
+			// Remove the '#' if present and parse the hex color
+			const hex = color.replace('#', '');
+			const r = parseInt(hex.substring(0, 2), 16);
+			const g = parseInt(hex.substring(2, 4), 16);
+			const b = parseInt(hex.substring(4, 6), 16);
+
+			// Calculate brightness of the given color
+			const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+
+			// Extract actual background color
+			const backgroundColor = window.getComputedStyle(document.body).backgroundColor;
+			const bgMatch = backgroundColor.match(/\d+/g);
+			const bgR = parseInt(bgMatch[0]);
+			const bgG = parseInt(bgMatch[1]);
+			const bgB = parseInt(bgMatch[2]);
+			const backgroundBrightness = (bgR * 299 + bgG * 587 + bgB * 114) / 1000;
+
+			// Return true if the brightness difference is less than the threshold
+			return Math.abs(brightness - backgroundBrightness) < 50; // Adjust threshold as needed
+		}
+
+		// Utility method to adjust color alpha
+		adjustColorAlpha(color, alpha) {
+			// Handle edge cases with color
+			if (!color || color === '') {
+				color = this.generateRandomColor();
+			}
+
+			const hex = color.replace('#', '');
+			const r = parseInt(hex.substring(0,2), 16);
+			const g = parseInt(hex.substring(2,4), 16);
+			const b = parseInt(hex.substring(4,6), 16);
+
+			return `rgba(${r},${g},${b},${alpha})`;
+		}
+
+		// Generate a random color if not provided
+		generateRandomColor() {
+			return `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
+		}
+	}
+
+	// Initialize the visualization
+	new TwitchChatViz();
+
+	// Toggle settings menu visibility
+	document.getElementById('settings-btn').addEventListener('click', () => {
+		const settingsMenu = document.getElementById('settings-menu');
+		settingsMenu.style.display = settingsMenu.style.display === 'none' ? 'block' : 'none';
+	});
+
+	// Add movable square functionality
+	const square = document.getElementById('movable-square');
+	const chattersContainer = document.getElementById('chatters-container');
+
+	let isDragging = false;
+	let offsetX, offsetY;
+
+	square.addEventListener('mousedown', (e) => {
+		isDragging = true;
+
+		// Adjust offsets due to the transform
+		offsetX = e.clientX - square.offsetLeft;
+		offsetY = e.clientY - square.offsetTop;
+
+		square.style.cursor = 'grabbing';
+	});
+
+	document.addEventListener('mouseup', () => {
+		isDragging = false;
+		square.style.cursor = 'grab';
+	});
+
+	function updateChattersAlignment() {
+		const squareRect = square.getBoundingClientRect();
+		const squareCenterX = squareRect.left + squareRect.width / 2;
+		const squareCenterY = squareRect.top + squareRect.height / 2;
+
+		// Get all chatter elements
+		const chatterElements = document.querySelectorAll('.chatter');
+
+		chatterElements.forEach(chatterEl => {
+			const chatterRect = chatterEl.getBoundingClientRect();
+			const chatterCenterX = chatterRect.left + chatterRect.width / 2;
+			const chatterCenterY = chatterRect.top + chatterRect.height / 2;
+
+			// Calculate the vector from the square to the chatter
+			const dx = chatterCenterX - squareCenterX;
+			const dy = chatterCenterY - squareCenterY;
+
+			// Calculate the distance
+			const distance = Math.sqrt(dx * dx + dy * dy) || 1;
+
+			// Use an exponential function to increase displacement
+			const displacement = Math.exp(-distance / 100) * 400;
+
+			// Calculate the translation offsets
+			let translateX = (dx / distance) * displacement;
+			let translateY = (dy / distance) * displacement;
+
+			// Ensure chatters do not overlap the square
+			const chatterNewRect = {
+				left: chatterRect.left + translateX,
+				top: chatterRect.top + translateY,
+				right: chatterRect.right + translateX,
+				bottom: chatterRect.bottom + translateY
+			};
+
+			if (isOverlapping(squareRect, chatterNewRect)) {
+				const overlapX = Math.max(0, Math.min(squareRect.right, chatterNewRect.right) - Math.max(squareRect.left, chatterNewRect.left));
+				const overlapY = Math.max(0, Math.min(squareRect.bottom, chatterNewRect.bottom) - Math.max(squareRect.top, chatterNewRect.top));
+
+				if (overlapX > 0) {
+					translateX += (translateX > 0 ? overlapX : -overlapX) * 1.5; // Increase pushing power on the sides
+				}
+				if (overlapY > 0) {
+					translateY += (translateY > 0 ? overlapY : -overlapY);
+				}
+			}
+
+			// Ensure chatters do not go out of the page
+			const windowWidth = window.innerWidth;
+			const windowHeight = window.innerHeight;
+
+			if (chatterNewRect.left < 0) {
+				translateX -= chatterNewRect.left;
+			} else if (chatterNewRect.right > windowWidth) {
+				translateX -= (chatterNewRect.right - windowWidth);
+			}
+
+			if (chatterNewRect.top < 0) {
+				translateY -= chatterNewRect.top;
+			} else if (chatterNewRect.bottom > windowHeight) {
+				translateY -= (chatterNewRect.bottom - windowHeight);
+			}
+
+			// Apply the transformation to move the chatter away
+			chatterEl.style.transform = `translate(${translateX}px, ${translateY}px)`;
+		});
+	}
+
+	// Helper function to check if two rectangles overlap
+	function isOverlapping(rect1, rect2) {
+		return !(rect1.right < rect2.left ||
+				 rect1.left > rect2.right ||
+				 rect1.bottom < rect2.top ||
+				 rect1.top > rect2.bottom);
+	}
+
+	document.addEventListener('mousemove', (e) => {
+		if (isDragging) {
+			let x = e.clientX - offsetX;
+			let y = e.clientY - offsetY;
+
+			// Constrain within the window
+			x = Math.max(0+square.clientWidth/2, Math.min(window.innerWidth - square.clientWidth/2, x));
+			y = Math.max(0+square.clientHeight/2, Math.min(window.innerHeight - square.clientHeight/2, y));
+
+			square.style.left = `${x}px`;
+			square.style.top = `${y}px`;
+
+			// Update chatters alignment
+			updateChattersAlignment();
+		}
+	});
+
+	window.addEventListener('resize', () => {
+		chattersContainer.style.paddingTop = '2px';
+		chattersContainer.style.paddingLeft = '2px';
+	});
+
+	// Access the webcam and display it in the square
+	navigator.mediaDevices.getUserMedia({ video: true })
+		.then(stream => {
+			const videoElement = document.querySelector('#movable-square video');
+			videoElement.srcObject = stream;
+		})
+		.catch(error => {
+			console.error('Error accessing the webcam:', error);
+		});
+	</script>
+</body>
+</html>
